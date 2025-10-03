@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Google Places — Lebanon Search (Restaurants & Hotels)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 20px; background: #f7f8fb; color: #222; }
+    .container { max-width: 980px; margin: 0 auto; background: #fff; padding: 18px; border-radius: 8px; box-shadow: 0 6px 18px rgba(9,10,15,0.06);}
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    .search-row { display:flex; gap:8px; margin-bottom:12px; }
+    input[type="search"] { flex: 1; padding:10px 12px; font-size:15px; border:1px solid #ddd; border-radius:6px; box-sizing: border-box; }
+    button { padding: 10px 12px; border-radius:6px; border: none; background:#1f6feb; color:#fff; cursor:pointer; font-weight:600; }
+    button:disabled { opacity:0.6; cursor:not-allowed; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; font-size:14px; }
+    th, td { text-align:left; padding:10px 8px; border-bottom:1px solid #efefef; vertical-align: middle; }
+    th { background: #fafafa; font-weight:700; position: sticky; top:0; z-index:1; }
+    .copy-btn { margin-left:8px; background:none; border:none; cursor:pointer; padding:4px; font-size:14px; }
+    .small-note { color:#666; font-size:13px; margin-top:8px; }
+    .status { margin-top:8px; color:#333; font-size:13px; }
+    .hidden-map { width: 1px; height: 1px; position: absolute; left: -9999px; top: -9999px; }
+    .spinner { display:inline-block; width:16px; height:16px; border:2px solid #ddd; border-top-color:#1f6feb; border-radius:50%; animation:spin 1s linear infinite; vertical-align:middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (max-width:700px) {
+      .container { padding: 12px; }
+      th, td { padding:8px 6px; font-size:13px; }
+      h1 { font-size:16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Search Google Places — Lebanon (Restaurants & Hotels)</h1>
+    <div class="search-row">
+      <input id="searchText" type="search" placeholder='Enter text (e.g. "McDonald")' value="McDonald" />
+      <button id="searchBtn">Search</button>
+    </div>
+    <div class="small-note">Search scope: Lebanon only. Results filtered to restaurants & hotels. Uses Google Places Text Search + Place Details.</div>
+    <div class="status" id="status"></div>
+
+    <table id="resultsTable" aria-live="polite">
+      <thead>
+        <tr>
+          <th style="width:19%">Maps ID</th>
+          <th style="width:22%">Listing Name</th>
+          <th style="width:16%">Type</th>
+          <th style="width:14%">Phone</th>
+          <th>Address</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody">
+        <tr><td colspan="5" style="padding:18px; color:#666">No results yet. Enter a search term and click Search.</td></tr>
+      </tbody>
+    </table>
+
+    <!-- Hidden map element required by PlacesService when using JS library -->
+    <div id="hidden-map" class="hidden-map" aria-hidden="true"></div>
+
+    <div style="margin-top:14px; color:#666; font-size:13px;">
+      Notes: This is a client-side demo — for heavy or repeat usage consider server-side caching of Place IDs & details and restricting your API key to your domain.
+    </div>
+  </div>
+
+  <script>
+    // Center point for Lebanon (Beirut) and radius ~200 km to cover the country
+    const LEBANON_CENTER = { lat: 33.8938, lng: 35.5018 };
+    const LEBANON_RADIUS_METERS = 200000;
+
+    let map, service;
+    let resultsAccumulator = [];
+
+    function initMap() {
+      // create a hidden map required by PlacesService
+      map = new google.maps.Map(document.getElementById('hidden-map'), {
+        center: LEBANON_CENTER,
+        zoom: 8,
+      });
+      service = new google.maps.places.PlacesService(map);
+
+      // wire up UI
+      document.getElementById('searchBtn').addEventListener('click', onSearchClicked);
+      document.getElementById('searchText').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') onSearchClicked();
+      });
+    }
+
+    function setStatus(html) {
+      document.getElementById('status').innerHTML = html || '';
+    }
+
+    function onSearchClicked() {
+      const q = document.getElementById('searchText').value.trim();
+      if (!q) {
+        alert('Please enter a search term.');
+        return;
+      }
+      resultsAccumulator = [];
+      clearTable();
+      setStatus('<span class="spinner"></span> Searching...');
+      document.getElementById('searchBtn').disabled = true;
+
+      // Text search request — restrict by location + radius to Lebanon and request types we care about
+      const request = {
+        query: q,
+        location: new google.maps.LatLng(LEBANON_CENTER.lat, LEBANON_CENTER.lng),
+        radius: LEBANON_RADIUS_METERS,
+        // We'll filter results by types in code (textSearch doesn't accept an array of types in all cases)
+      };
+
+      service.textSearch(request, textSearchCallback);
+    }
+
+    function textSearchCallback(results, status, pagination) {
+      if (status !== google.maps.places.PlacesServiceStatus.OK && status !== google.maps.places.PlacesServiceStatus.ZERO_RESULTS) {
+        setStatus('Search error: ' + status);
+        document.getElementById('searchBtn').disabled = false;
+        return;
+      }
+
+      // Filter results to restaurants & lodging (hotels)
+      const filtered = (results || []).filter(p => {
+        if (!p.types) return false;
+        // Accept if types include restaurant or lodging or hotel
+        return p.types.includes('restaurant') || p.types.includes('lodging') || p.types.includes('food') || p.types.includes('hotel');
+      });
+
+      // Accumulate
+      resultsAccumulator = resultsAccumulator.concat(filtered);
+
+      // If have results now, show interim table and then fetch details for each place
+      if (resultsAccumulator.length) {
+        renderInterimRows(resultsAccumulator);
+        // Fetch details for all accumulated places (rate-limited)
+        fetchDetailsForPlaces(resultsAccumulator).then(() => {
+          setStatus('Search complete — showing ' + resultsAccumulator.length + ' filtered results.');
+          document.getElementById('searchBtn').disabled = false;
+        }).catch(err => {
+          console.error(err);
+          setStatus('Finished with some errors. See console.');
+          document.getElementById('searchBtn').disabled = false;
+        });
+      } else {
+        // show zero results for this batch
+        if (pagination && pagination.hasNextPage) {
+          // request next page (must wait 2 seconds per Google guidance)
+          setTimeout(() => pagination.nextPage(), 2000);
+        } else {
+          setStatus('No results found.');
+          document.getElementById('searchBtn').disabled = false;
+        }
+      }
+
+      // If there are more pages, auto fetch them (Places returns up to 3 pages)
+      if (pagination && pagination.hasNextPage) {
+        setTimeout(() => pagination.nextPage(), 2000);
+      }
+    }
+
+    function clearTable() {
+      const tbody = document.getElementById('resultsBody');
+      tbody.innerHTML = '';
+    }
+
+    function renderInterimRows(placesArray) {
+      const tbody = document.getElementById('resultsBody');
+      tbody.innerHTML = '';
+      for (const p of placesArray) {
+        const tr = document.createElement('tr');
+
+        const tdId = document.createElement('td');
+        tdId.style.wordBreak = 'break-word';
+        tdId.innerHTML = `<code id="pid-${escapeHtml(p.place_id)}">${escapeHtml(p.place_id)}</code>
+          <button class="copy-btn" title="Copy Place ID" data-pid="${escapeHtml(p.place_id)}">📋</button>`;
+        tr.appendChild(tdId);
+
+        const tdName = document.createElement('td');
+        tdName.textContent = p.name || '—';
+        tr.appendChild(tdName);
+
+        const tdType = document.createElement('td');
+        tdType.textContent = (p.types && p.types.join(', ')) || '—';
+        tr.appendChild(tdType);
+
+        const tdPhone = document.createElement('td');
+        tdPhone.id = `phone-${escapeHtml(p.place_id)}`;
+        tdPhone.textContent = 'loading…';
+        tr.appendChild(tdPhone);
+
+        const tdAddress = document.createElement('td');
+        tdAddress.id = `addr-${escapeHtml(p.place_id)}`;
+        tdAddress.textContent = p.formatted_address || 'loading…';
+        tr.appendChild(tdAddress);
+
+        tbody.appendChild(tr);
+      }
+
+      // wire copy buttons
+      Array.from(document.querySelectorAll('.copy-btn')).forEach(btn => {
+        btn.onclick = (e) => {
+          const pid = btn.getAttribute('data-pid');
+          navigator.clipboard.writeText(pid).then(() => {
+            btn.textContent = '✅';
+            setTimeout(() => btn.textContent = '📋', 900);
+          }).catch(() => {
+            alert('Copy failed — select and copy manually.');
+          });
+        };
+      });
+    }
+
+    // Fetch place details for each place (rate-limited to be gentle); fills phone/address fields.
+    async function fetchDetailsForPlaces(placesArray) {
+      // We'll only request details for unique place_ids
+      const unique = Array.from(new Map(placesArray.map(p => [p.place_id, p])).values());
+
+      for (let i = 0; i < unique.length; i++) {
+        const p = unique[i];
+        try {
+          const details = await getPlaceDetailsAsync(p.place_id);
+          const phoneCell = document.getElementById('phone-' + p.place_id);
+          const addrCell  = document.getElementById('addr-'  + p.place_id);
+
+          if (phoneCell) phoneCell.textContent = details.formatted_phone_number || '—';
+          if (addrCell)  addrCell.textContent  = details.formatted_address || (p.formatted_address || '—');
+
+        } catch (err) {
+          console.warn('Details failed for', p.place_id, err);
+        }
+        // small pause to avoid hitting rate limits too fast
+        await sleep(170);
+      }
+    }
+
+    // Wrap PlacesService.getDetails in a Promise
+    function getPlaceDetailsAsync(placeId) {
+      return new Promise((resolve, reject) => {
+        const req = {
+          placeId: placeId,
+          fields: ['place_id','name','formatted_address','formatted_phone_number','types']
+        };
+        service.getDetails(req, (place, status) => {
+          if (status === google.maps.places.PlacesServiceStatus.OK && place) {
+            resolve(place);
+          } else {
+            reject(status || 'NO_DETAILS');
+          }
+        });
+      });
+    }
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    // small helper for safety
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/[&<>"']/g, s => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      })[s]);
+    }
+  </script>
+
+  <!-- Replace YOUR_API_KEY_HERE below with your API key. Keep 'libraries=places' and callback=initMap -->
+  <script async defer
+    src="https://maps.googleapis.com/maps/api/js?key=YOUR_API_KEY_HERE&libraries=places&callback=initMap">
+  </script>
+</body>
+</html>
